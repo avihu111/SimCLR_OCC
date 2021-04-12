@@ -3,6 +3,18 @@ from data_aug.gaussian_blur import GaussianBlur
 from torchvision import transforms, datasets
 from data_aug.view_generator import ContrastiveLearningViewGenerator
 from exceptions.exceptions import InvalidDatasetSelection
+from torch.utils.data import Dataset
+
+class DatasetWrapper(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __getitem__(self, index):
+        data, target = self.dataset[index]
+        return data, target, index
+
+    def __len__(self):
+        return len(self.dataset)
 
 
 class ContrastiveLearningDataset:
@@ -28,7 +40,7 @@ class ContrastiveLearningDataset:
                                                                   n_views),
                                                               download=True),
 
-                          'stl10': lambda: datasets.STL10(self.root_folder, split='unlabeled',
+                          'stl10': lambda: datasets.STL10(self.root_folder, split='train+unlabeled',
                                                           transform=ContrastiveLearningViewGenerator(
                                                               self.get_simclr_pipeline_transform(96),
                                                               n_views),
@@ -39,4 +51,10 @@ class ContrastiveLearningDataset:
         except KeyError:
             raise InvalidDatasetSelection()
         else:
-            return dataset_fn()
+            return DatasetWrapper(dataset_fn())
+
+
+    def get_test_dataset(self, name):
+        if name == 'stl10':
+            return datasets.STL10(self.root_folder, split='test',transform=transforms.ToTensor(), download=True)
+        raise ValueError("unsupported dataset")

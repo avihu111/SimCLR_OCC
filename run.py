@@ -19,12 +19,12 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     choices=model_names,
                     help='model architecture: ' +
                          ' | '.join(model_names) +
-                         ' (default: resnet50)')
+                         ' (default: resnet18)')
 parser.add_argument('-j', '--workers', default=12, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
-parser.add_argument('--epochs', default=200, type=int, metavar='N',
+parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
+parser.add_argument('-b', '--batch-size', default=512, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -50,6 +50,10 @@ parser.add_argument('--temperature', default=0.07, type=float,
 parser.add_argument('--n-views', default=2, type=int, metavar='N',
                     help='Number of views for contrastive learning training.')
 parser.add_argument('--gpu-index', default=0, type=int, help='Gpu index.')
+# the class I wish to make it's representations compact
+parser.add_argument('--rel_class', default=0, type=int, help='rel_class')
+parser.add_argument('--num_examples', default=250, type=int, help='number of labeled examples')
+parser.add_argument('--lamb', default=1., type=float, help='lamb')
 
 
 def main():
@@ -72,17 +76,26 @@ def main():
         train_dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True, drop_last=True)
 
+    last_valid_index = (train_dataset.dataset.labels == args.rel_class).nonzero()[0][args.num_examples] + 1
     model = ResNetSimCLR(base_model=args.arch, out_dim=args.out_dim)
-
+    pretrained = torch.load('./models/checkpoint_0100.pth.tar')
+    print('loading pretrained {} with {} epochs'.format(pretrained['arch'], pretrained['epoch']))
+    model.load_state_dict(pretrained['state_dict'])
     optimizer = torch.optim.Adam(model.parameters(), args.lr, weight_decay=args.weight_decay)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_loader), eta_min=0,
                                                            last_epoch=-1)
 
+    test_dataset = dataset.get_test_dataset(args.dataset_name)
+
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=1, pin_memory=True, drop_last=True)
     #  It’s a no-op if the 'gpu_index' argument is a negative integer or None.
     with torch.cuda.device(args.gpu_index):
-        simclr = SimCLR(model=model, optimizer=optimizer, scheduler=scheduler, args=args)
-        simclr.train(train_loader)
+        simclr = SimCLR(model=model, optimizer=optimizer, scheduler=scheduler, args=args,
+                        last_valid_index=last_valid_index)
+        simclr.train(train_loader, test_loader)
 
 
 if __name__ == "__main__":
