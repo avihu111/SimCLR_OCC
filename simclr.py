@@ -2,17 +2,15 @@ import logging
 import os
 import sys
 from datetime import datetime
-import matplotlib.pyplot as plt
-import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import torch
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from utils import save_config_file, accuracy, save_checkpoint
-from sklearn.manifold import TSNE
-from sklearn.svm import OneClassSVM, LinearSVC
-from sklearn.metrics import silhouette_score
+from evaluate import Evaluator
 
 torch.manual_seed(0)
 root = logging.getLogger()
@@ -23,6 +21,7 @@ handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 root.addHandler(handler)
+logging.getLogger('matplotlib.font_manager').disabled = True
 
 
 class SimCLR(object):
@@ -35,11 +34,12 @@ class SimCLR(object):
         self.last_valid_index = kwargs['last_valid_index']
 
         current_time = datetime.now().strftime('%b%d_%H-%M-%S')
-        log_dir = f'runs/{current_time}_lamb{self.args.lamb:.2f}_exmp{self.args.num_examples}'
+        log_dir = f'runs/{current_time}_lamb{self.args.lamb:.2f}_exmp{self.args.num_examples}_class{self.args.rel_class}'
         self.writer = SummaryWriter(log_dir)
         logging.basicConfig(filename=os.path.join(self.writer.log_dir, 'training.log'), level=logging.DEBUG)
         self.criterion = torch.nn.CrossEntropyLoss().to(self.args.device)
         self.compactness_criterion = torch.nn.MSELoss().to(self.args.device)
+        self.evaluator = Evaluator(self.writer, self.args, self.model, logging)
 
     def info_nce_loss(self, features):
         labels = torch.cat([torch.arange(self.args.batch_size) for i in range(self.args.n_views)], dim=0)
@@ -83,9 +83,9 @@ class SimCLR(object):
         # save config file
         save_config_file(self.writer.log_dir, self.args)
         n_iter = 0
-        self.run_on_test(test_loader, n_iter, train_loader.dataset.dataset)
+        self.evaluator.evaluate(test_loader, n_iter, train_loader.dataset.dataset)
         logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
-        logging.info(f"Training with gpu: {self.args.disable_cuda}.")
+        logging.info(f"Training with gpu: {not self.args.disable_cuda}.")
         for epoch_counter in range(self.args.epochs):
             for images, classes, indices in tqdm(train_loader):
                 images = torch.cat(images, dim=0)
@@ -95,10 +95,9 @@ class SimCLR(object):
                     features = self.model(images)
                     logits, labels = self.info_nce_loss(features)
                     constructive_loss = self.criterion(logits, labels)
-                    meaned_rel_features = self.compactness_loss_info(features, classes, indices)
-                    compactness_loss = self.args.lamb * self.compactness_criterion(meaned_rel_features,
-                                                                                   torch.zeros_like(
-                                                                                       meaned_rel_features))
+                    zero_mean_labeled = self.compactness_loss_info(features, classes, indices)
+                    compactness_loss = self.args.lamb * self.compactness_criterion(zero_mean_labeled,
+                                                                                   torch.zeros_like(zero_mean_labeled))
                     # convert nan loss to 0, when there are no samples to make compact
                     compactness_loss[compactness_loss != compactness_loss] = 0
 
@@ -111,7 +110,6 @@ class SimCLR(object):
 
                 if n_iter % self.args.log_every_n_steps == 0:
                     top1, top5 = accuracy(logits, labels, topk=(1, 5))
-
                     self.writer.add_scalar('losses/constructive_loss', constructive_loss, global_step=n_iter)
                     self.writer.add_scalar('losses/compactness_loss', compactness_loss, global_step=n_iter)
                     self.writer.add_scalar('losses/total_loss', constructive_loss + compactness_loss,
@@ -124,7 +122,7 @@ class SimCLR(object):
             # run tests every 5 epochs
 
             logging.info(f"evaluating on epoch {epoch_counter + 1}")
-            self.run_on_test(test_loader, n_iter, train_loader.dataset.dataset)
+            self.evaluator.evaluate(test_loader, n_iter, train_loader.dataset.dataset)
             # warmup for the first 10 epochs
             if epoch_counter >= 10:
                 self.scheduler.step()
@@ -145,99 +143,3 @@ class SimCLR(object):
 
         logging.info(f"Model checkpoint and metadata has been saved at {self.writer.log_dir}.")
 
-    def run_on_test(self, test_loader, n_iter, train_dataset):
-        all_features = []
-        all_labels = []
-
-        for batch_id, (images, labels) in enumerate(test_loader):
-            features = self.model(images.to(self.args.device))
-            all_features.append(features.cpu().detach().numpy())
-            all_labels.append(labels.detach().numpy())
-
-        all_labels = np.concatenate(all_labels, axis=0)
-        # maybe unite all other colors to -1?
-        all_features = np.concatenate(all_features, axis=0)
-        # solve linear svm to check separability of the class
-        self.svm(all_features, all_labels, n_iter)
-        self.separation_metrics(all_features, all_labels, n_iter)
-        self.plot_tsne(all_labels, n_iter, all_features, test_loader.dataset.classes)
-        # self.one_class_svm(all_features, all_labels, n_iter, train_dataset)
-
-    def svm(self, all_features, all_labels, n_iter):
-        """
-        learning an SVM and checking it to see how separable the sets are
-        """
-        binary_labels = (all_labels == self.args.rel_class).astype(int)
-        svc = LinearSVC()
-        svc.fit(all_features, binary_labels)
-        binary_preds = svc.predict(all_features)
-        TP = (binary_labels & binary_preds).sum()
-        precision = TP / binary_preds.sum()
-        recall = TP / binary_labels.sum()
-        accur = (binary_labels == binary_preds).mean()
-        self.writer.add_scalar('SVC/precision', precision, n_iter)
-        self.writer.add_scalar('SVC/recall', recall, n_iter)
-        self.writer.add_scalar('SVC/accuracy', accur, n_iter)
-        logging.info(f"SVM accuracy: {accur}")
-
-    def one_class_svm(self, all_features, all_labels, n_iter, train_dataset):
-        positive_indices = (train_dataset.labels == 0).nonzero()[0][:self.args.num_examples]
-        positive_samples = torch.FloatTensor(train_dataset.data[positive_indices] / 255.)
-        positive_features = self.model(positive_samples.to(self.args.device))
-        positive_features = positive_features.cpu().detach().numpy()
-        svm = OneClassSVM(nu=0.9)
-        svm.fit(positive_features)
-
-        is_novelty_pred = svm.predict(all_features) == -1
-        is_novelty_true = all_labels == self.args.rel_class
-        accur = (is_novelty_true == is_novelty_pred).mean()
-        TP = (is_novelty_true & is_novelty_pred).sum()
-        recall = np.nan_to_num(TP / is_novelty_true.sum())
-        precision = np.nan_to_num(TP / is_novelty_pred.sum())
-        self.writer.add_scalar('OneClassSVM/recall', recall, n_iter)
-        self.writer.add_scalar('OneClassSVM/precision', precision, n_iter)
-        self.writer.add_scalar('OneClassSVM/accuracy', accur, n_iter)
-
-    def plot_tsne(self, all_labels, n_iter, all_features, classes):
-        tsne = TSNE()
-        reduced_features = tsne.fit_transform(all_features)
-        rel_centroid = reduced_features[all_labels == self.args.rel_class].mean(axis=0)
-        rel_centroid = rel_centroid / np.linalg.norm(rel_centroid)
-        R = np.stack([rel_centroid, rel_centroid[::-1]])
-        R[0, 1] = -R[0, 1]
-
-        reduced_features = (R @ reduced_features.T).T
-        fig, axis = plt.subplots()
-        cmap = plt.cm.get_cmap('tab10')(np.arange(10))
-        cmap[:, -1] = 0.5
-        # seeing our class last
-        for lab in np.unique(all_labels)[::-1]:
-            mask = all_labels == lab
-            x, y = reduced_features[mask].T
-            axis.scatter(x, y, c=cmap[[lab]], label=classes[lab])
-
-        axis.legend(loc='upper left')
-        fig.canvas.draw()
-        tsne_plot_array = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
-        tsne_plot_array = tsne_plot_array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        self.writer.add_image('tSNE', tsne_plot_array, global_step=n_iter, dataformats='HWC')
-        plt.close('all')
-
-    def separation_metrics(self, all_features, all_labels, n_iter):
-        binary_labels = (all_labels == self.args.rel_class).astype(int)
-        rel_features = all_features[binary_labels]
-        rel_centroid = rel_features.mean(axis=0)
-        rel_variance = ((rel_features - rel_centroid[None, :]) ** 2).mean()
-        orig_centroid = all_features.mean(axis=0)
-        orig_variance = ((all_features - orig_centroid[None, :]) ** 2).mean()
-        variance_ratio = rel_variance / orig_variance
-        self.writer.add_scalar('separation/variance_ratio', variance_ratio, n_iter)
-        centroids_distance = ((rel_centroid - orig_centroid) ** 2).sum()
-        self.writer.add_scalar('separation/mean_centroid_distance', centroids_distance, n_iter)
-        # less sensitive to scales
-        var_normalized_distance = centroids_distance / (rel_variance + orig_variance)
-        self.writer.add_scalar('separation/var_normalized_distance', var_normalized_distance, n_iter)
-        # between -1 to 1. best result is 1.
-        silhouette = silhouette_score(all_features, binary_labels)
-        self.writer.add_scalar('separation/silhouette', silhouette, n_iter)
-        logging.info(f"normalized distance: {var_normalized_distance}. silhouette: {silhouette}")

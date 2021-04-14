@@ -20,7 +20,7 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     help='model architecture: ' +
                          ' | '.join(model_names) +
                          ' (default: resnet18)')
-parser.add_argument('-j', '--workers', default=12, type=int, metavar='N',
+parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
@@ -51,9 +51,9 @@ parser.add_argument('--n-views', default=2, type=int, metavar='N',
                     help='Number of views for contrastive learning training.')
 parser.add_argument('--gpu-index', default=0, type=int, help='Gpu index.')
 # the class I wish to make it's representations compact
-parser.add_argument('--rel_class', default=0, type=int, help='rel_class')
-parser.add_argument('--num_examples', default=250, type=int, help='number of labeled examples')
-parser.add_argument('--lamb', default=1., type=float, help='lamb')
+parser.add_argument('--rel-class', default=0, type=int, help='rel_class')
+parser.add_argument('--num-examples', default=250, type=int, help='number of labeled examples')
+parser.add_argument('--lamb', default=10., type=float, help='lamb')
 
 
 def main():
@@ -65,6 +65,7 @@ def main():
         cudnn.deterministic = True
         cudnn.benchmark = True
     else:
+        print("shoot, only cpu :(")
         args.device = torch.device('cpu')
         args.gpu_index = -1
 
