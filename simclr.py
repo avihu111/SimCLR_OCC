@@ -78,12 +78,12 @@ class SimCLR(object):
         meaned_rel_features = rel_features - rel_features.mean(dim=0, keepdim=True)
         return meaned_rel_features
 
-    def train(self, train_loader, test_loader):
+    def train(self, train_loader, test_loader, train_labeled_loader):
         scaler = GradScaler(enabled=self.args.fp16_precision)
         # save config file
         save_config_file(self.writer.log_dir, self.args)
         n_iter = 0
-        self.evaluator.evaluate(test_loader, n_iter, train_loader.dataset.dataset)
+        self.evaluator.evaluate(test_loader, n_iter, train_loader.dataset.dataset, train_labeled_loader)
         logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
         logging.info(f"Training with gpu: {not self.args.disable_cuda}.")
         for epoch_counter in range(self.args.epochs):
@@ -122,7 +122,7 @@ class SimCLR(object):
             # run tests every 5 epochs
 
             logging.info(f"evaluating on epoch {epoch_counter + 1}")
-            self.evaluator.evaluate(test_loader, n_iter, train_loader.dataset.dataset)
+            self.evaluator.evaluate(test_loader, n_iter, train_loader.dataset.dataset, train_labeled_loader)
             # warmup for the first 10 epochs
             if epoch_counter >= 10:
                 self.scheduler.step()

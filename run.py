@@ -92,11 +92,18 @@ def main():
     test_loader = torch.utils.data.DataLoader(
         test_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=1, pin_memory=True, drop_last=True)
+
+    positive_indices = (train_dataset.dataset.labels == 0).nonzero()[0][:args.num_examples]
+
+    train_labeled_dataset = dataset.get_test_dataset('stl10_train')
+    train_labeled_loader = torch.utils.data.DataLoader(
+        train_labeled_dataset, batch_sampler=positive_indices.reshape(2, -1),
+        num_workers=1, pin_memory=True)
     #  It’s a no-op if the 'gpu_index' argument is a negative integer or None.
     with torch.cuda.device(args.gpu_index):
         simclr = SimCLR(model=model, optimizer=optimizer, scheduler=scheduler, args=args,
                         last_valid_index=last_valid_index)
-        simclr.train(train_loader, test_loader)
+        simclr.train(train_loader, test_loader, train_labeled_loader)
 
 
 if __name__ == "__main__":

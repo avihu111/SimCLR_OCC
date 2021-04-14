@@ -13,7 +13,7 @@ class Evaluator():
         self.model = model
         self.logging = logging
 
-    def evaluate(self, test_loader, n_iter, train_dataset):
+    def evaluate(self, test_loader, n_iter, train_dataset, train_labeled_loader):
         all_features = []
         all_labels = []
 
@@ -28,19 +28,22 @@ class Evaluator():
         # solve linear svm to check separability of the class
         self.svm(all_features, all_labels, n_iter)
         self.separation_metrics(all_features, all_labels, n_iter)
-        positive_features = self.get_labeled_features(train_dataset)
+        positive_features = self.get_labeled_features(train_labeled_loader)
         reduced_features = self.calculate_tsne(all_features, all_labels)
         self.plot_tsne(all_labels, n_iter, reduced_features, test_loader.dataset.classes, 'tSNE')
         # self.one_class_svm(all_features, all_labels, n_iter, positive_features, reduced_features)
         self.k_nearest(all_features, all_labels, n_iter, positive_features, reduced_features)
         self.writer.flush()
 
-    def get_labeled_features(self, train_dataset):
-        positive_indices = (train_dataset.labels == 0).nonzero()[0][:self.args.num_examples]
-        positive_samples = torch.FloatTensor(train_dataset.data[positive_indices] / 255.)
-        positive_features = self.model(positive_samples.to(self.args.device))
-        positive_features = positive_features.cpu().detach().numpy()
-        return positive_features
+    def get_labeled_features(self, train_labeled_loader):
+        all_features = []
+        for batch_id, (images, labels) in enumerate(train_labeled_loader):
+            features = self.model(images.to(self.args.device))
+            all_features.append(features.cpu().detach().numpy())
+
+        # maybe unite all other colors to -1?
+        all_features = np.concatenate(all_features, axis=0)
+        return all_features
 
     def svm(self, all_features, all_labels, n_iter):
         """
@@ -98,7 +101,9 @@ class Evaluator():
             auc = roc_auc_score(is_outlier_true, mean_distance)
             self.writer.add_scalar(f'k_nearest_auc/k={k}', auc, n_iter)
             roc_axis.plot(fpr, tpr, label=f'k={k}_auc={auc:.3f}')
-            optimal_cutoff = thresholds[np.argmax(tpr - fpr)]
+            # optimal is closest point to [0,1]
+            diff_from_best = (1 - tpr) ** 2 + fpr ** 2
+            optimal_cutoff = thresholds[np.argmin(diff_from_best)]
             self.plot_tsne((mean_distance > optimal_cutoff).astype(int), n_iter, reduced_features,
                            classes=['inlier', 'outlier'], plot_name=f'k_nearest_tSNE/k={k}')
 

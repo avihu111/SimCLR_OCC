@@ -57,4 +57,8 @@ class ContrastiveLearningDataset:
     def get_test_dataset(self, name):
         if name == 'stl10':
             return datasets.STL10(self.root_folder, split='test',transform=transforms.ToTensor(), download=True)
+        if name == 'stl10_train':
+            return datasets.STL10(self.root_folder, split='train', transform=transforms.ToTensor(), download=True)
+
+
         raise ValueError("unsupported dataset")
