@@ -14,10 +14,7 @@ from evaluate import Evaluator
 
 torch.manual_seed(0)
 root = logging.getLogger()
-root.setLevel(logging.DEBUG)
-
 handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 root.addHandler(handler)
@@ -28,14 +25,15 @@ class SimCLR(object):
 
     def __init__(self, *args, **kwargs):
         self.args = kwargs['args']
+        self.neptune_run = kwargs['neptune_run']
         self.model = kwargs['model'].to(self.args.device)
         self.optimizer = kwargs['optimizer']
         self.scheduler = kwargs['scheduler']
         self.last_valid_index = kwargs['last_valid_index']
 
         current_time = datetime.now().strftime('%b%d_%H-%M-%S')
-        log_dir = f'runs/{current_time}_lamb{self.args.lamb:.2f}_exmp{self.args.num_examples}_class{self.args.rel_class}'
-        self.writer = SummaryWriter(log_dir)
+        # log_dir = "runs/{}_lamb{}{:.2f}_exmp{}_class{}".format(current_time, self.params["lambda'], self.params['num_examples'], self.params['relevant_class'])
+        # self.writer = SummaryWriter(log_dir)
         logging.basicConfig(filename=os.path.join(self.writer.log_dir, 'training.log'), level=logging.DEBUG)
         self.criterion = torch.nn.CrossEntropyLoss().to(self.args.device)
         self.compactness_criterion = torch.nn.MSELoss().to(self.args.device)
@@ -81,7 +79,7 @@ class SimCLR(object):
     def train(self, train_loader, test_loader, train_labeled_loader):
         scaler = GradScaler(enabled=self.args.fp16_precision)
         # save config file
-        save_config_file(self.writer.log_dir, self.args)
+        save_config_file(self.neptune_run.log_dir, self.args)
         n_iter = 0
         self.evaluator.evaluate(test_loader, n_iter, train_loader.dataset.dataset, train_labeled_loader)
         logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
@@ -110,13 +108,13 @@ class SimCLR(object):
 
                 if n_iter % self.args.log_every_n_steps == 0:
                     top1, top5 = accuracy(logits, labels, topk=(1, 5))
-                    self.writer.add_scalar('losses/constructive_loss', constructive_loss, global_step=n_iter)
-                    self.writer.add_scalar('losses/compactness_loss', compactness_loss, global_step=n_iter)
-                    self.writer.add_scalar('losses/total_loss', constructive_loss + compactness_loss,
+                    self.neptune_run.add_scalar('losses/constructive_loss', constructive_loss, global_step=n_iter)
+                    self.neptune_run.add_scalar('losses/compactness_loss', compactness_loss, global_step=n_iter)
+                    self.neptune_run.add_scalar('losses/total_loss', constructive_loss + compactness_loss,
                                            global_step=n_iter)
-                    self.writer.add_scalar('acc/top1', top1[0], global_step=n_iter)
-                    self.writer.add_scalar('acc/top5', top5[0], global_step=n_iter)
-                    self.writer.add_scalar('learning_rate', self.scheduler.get_lr()[0], global_step=n_iter)
+                    self.neptune_run.add_scalar('acc/top1', top1[0], global_step=n_iter)
+                    self.neptune_run.add_scalar('acc/top5', top5[0], global_step=n_iter)
+                    self.neptune_run.add_scalar('learning_rate', self.scheduler.get_lr()[0], global_step=n_iter)
 
                 n_iter += 1
             # run tests every 5 epochs
@@ -135,11 +133,11 @@ class SimCLR(object):
                     'arch': self.args.arch,
                     'state_dict': self.model.state_dict(),
                     'optimizer': self.optimizer.state_dict(),
-                }, is_best=False, filename=os.path.join(self.writer.log_dir, checkpoint_name))
+                }, is_best=False, filename=os.path.join(self.neptune_run.log_dir, checkpoint_name))
             logging.debug(f"Epoch: {epoch_counter}\tLoss: {constructive_loss}\tTop1 accuracy: {top1[0]}")
 
         logging.info("Training has finished.")
         # save model checkpoints
 
-        logging.info(f"Model checkpoint and metadata has been saved at {self.writer.log_dir}.")
+        logging.info(f"Model checkpoint and metadata has been saved at {self.neptune_run.log_dir}.")
 

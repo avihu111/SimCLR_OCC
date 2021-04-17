@@ -7,8 +7,8 @@ import torch
 from MulticoreTSNE import MulticoreTSNE as TSNE
 
 class Evaluator():
-    def __init__(self, writer, args, model, logging):
-        self.writer = writer
+    def __init__(self, neptune_run, args, model, logging):
+        self.neptune_run = neptune_run
         self.args = args
         self.model = model
         self.logging = logging
@@ -33,7 +33,7 @@ class Evaluator():
         self.plot_tsne(all_labels, n_iter, reduced_features, test_loader.dataset.classes, 'tSNE')
         # self.one_class_svm(all_features, all_labels, n_iter, positive_features, reduced_features)
         self.k_nearest(all_features, all_labels, n_iter, positive_features, reduced_features)
-        self.writer.flush()
+        self.neptune_run.flush()
 
     def get_labeled_features(self, train_labeled_loader):
         all_features = []
@@ -58,10 +58,10 @@ class Evaluator():
         recall = TP / binary_labels.sum()
         accur = (binary_labels == binary_preds).mean()
         IoU = TP / (binary_labels | binary_preds).sum()
-        self.writer.add_scalar('SVC/precision', precision, n_iter)
-        self.writer.add_scalar('SVC/recall', recall, n_iter)
-        self.writer.add_scalar('SVC/accuracy', accur, n_iter)
-        self.writer.add_scalar('SVC/IoU', IoU, n_iter)
+        self.neptune_run.add_scalar('SVC/precision', precision, n_iter)
+        self.neptune_run.add_scalar('SVC/recall', recall, n_iter)
+        self.neptune_run.add_scalar('SVC/accuracy', accur, n_iter)
+        self.neptune_run.add_scalar('SVC/IoU', IoU, n_iter)
         self.logging.info(f"SVM accuracy: {accur}")
 
     def one_class_svm(self, all_features, all_labels, n_iter, positive_features, reduced_features):
@@ -79,11 +79,11 @@ class Evaluator():
                 precision = np.nan_to_num(TP / is_inlier_pred.sum())
                 IoU = np.nan_to_num(TP / (is_inlier_true | is_inlier_pred).sum())
                 f_score = 2 * precision * recall / (precision + recall)
-                self.writer.add_scalar(f'OneClassSVM_recall/nu={nu}_gamma={gamma}', recall, n_iter)
-                self.writer.add_scalar(f'OneClassSVM_precision/nu={nu}_gamma={gamma}', precision, n_iter)
-                self.writer.add_scalar(f'OneClassSVM_accuracy/nu={nu}_gamma={gamma}', accur, n_iter)
-                self.writer.add_scalar(f'OneClassSVM_IoU/nu={nu}_gamma={gamma}', IoU, n_iter)
-                self.writer.add_scalar(f'OneClassSVM_Fscore/nu={nu}_gamma={gamma}', f_score, n_iter)
+                self.neptune_run.add_scalar(f'OneClassSVM_recall/nu={nu}_gamma={gamma}', recall, n_iter)
+                self.neptune_run.add_scalar(f'OneClassSVM_precision/nu={nu}_gamma={gamma}', precision, n_iter)
+                self.neptune_run.add_scalar(f'OneClassSVM_accuracy/nu={nu}_gamma={gamma}', accur, n_iter)
+                self.neptune_run.add_scalar(f'OneClassSVM_IoU/nu={nu}_gamma={gamma}', IoU, n_iter)
+                self.neptune_run.add_scalar(f'OneClassSVM_Fscore/nu={nu}_gamma={gamma}', f_score, n_iter)
                 self.plot_tsne(is_inlier_pred.astype(int), n_iter, reduced_features,
                                classes=['outlier', 'inlier'],
                                plot_name=f'OneClassSVM/nu={nu}_gamma={gamma}')
@@ -99,7 +99,7 @@ class Evaluator():
             is_outlier_true = (all_labels != self.args.rel_class).astype(int)
             fpr, tpr, thresholds = roc_curve(is_outlier_true, mean_distance)
             auc = roc_auc_score(is_outlier_true, mean_distance)
-            self.writer.add_scalar(f'k_nearest_auc/k={k}', auc, n_iter)
+            self.neptune_run.add_scalar(f'k_nearest_auc/k={k}', auc, n_iter)
             roc_axis.plot(fpr, tpr, label=f'k={k}_auc={auc:.3f}')
             # optimal is closest point to [0,1]
             diff_from_best = (1 - tpr) ** 2 + fpr ** 2
@@ -109,11 +109,11 @@ class Evaluator():
 
         roc_axis.set_xlabel('FPR')
         roc_axis.set_ylabel('TPR')
-        roc_axis.legend()
+        roc_axis.legend('lower left')
         roc_fig.canvas.draw()
         roc_im = np.fromstring(roc_fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
         roc_im = roc_im.reshape(roc_fig.canvas.get_width_height()[::-1] + (3,))
-        self.writer.add_image(f'k_nearest_roc/k={k}', roc_im, global_step=n_iter, dataformats='HWC')
+        self.neptune_run.add_image(f'k_nearest_roc/k={k}', roc_im, global_step=n_iter, dataformats='HWC')
         plt.close('all')
 
     def plot_tsne(self, all_labels, n_iter, reduced_features, classes, plot_name):
@@ -130,7 +130,7 @@ class Evaluator():
         fig.canvas.draw()
         tsne_plot_array = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
         tsne_plot_array = tsne_plot_array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        self.writer.add_image(plot_name, tsne_plot_array, global_step=n_iter, dataformats='HWC')
+        self.neptune_run.add_image(plot_name, tsne_plot_array, global_step=n_iter, dataformats='HWC')
         plt.close('all')
 
     def calculate_tsne(self, all_features, all_labels):
@@ -160,7 +160,7 @@ class Evaluator():
         # between -1 to 1. best result is 1.
         silhouette = silhouette_score(all_features, binary_labels.astype(int))
         silhouette_all = silhouette_score(all_features, all_labels)
-        self.writer.add_scalar('separation/silhouette', silhouette, n_iter)
-        self.writer.add_scalar('separation/silhouette_all', silhouette_all, n_iter)
-        self.writer.add_scalar('separation/FLD', fisher_score, n_iter)
+        self.neptune_run.add_scalar('separation/silhouette', silhouette, n_iter)
+        self.neptune_run.add_scalar('separation/silhouette_all', silhouette_all, n_iter)
+        self.neptune_run.add_scalar('separation/FLD', fisher_score, n_iter)
         self.logging.info(f"silhouette: {silhouette}")
