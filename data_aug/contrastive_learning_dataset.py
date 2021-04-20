@@ -1,10 +1,10 @@
+import numpy as np
 from torchvision.transforms import transforms
 from data_aug.gaussian_blur import GaussianBlur
 from torchvision import transforms, datasets
 from data_aug.view_generator import ContrastiveLearningViewGenerator
 from exceptions.exceptions import InvalidDatasetSelection
 from torch.utils.data import Dataset
-
 class DatasetWrapper(Dataset):
     def __init__(self, dataset):
         self.dataset = dataset
@@ -34,31 +34,36 @@ class ContrastiveLearningDataset:
         return data_transforms
 
     def get_dataset(self, name, n_views):
-        valid_datasets = {'cifar10': lambda: datasets.CIFAR10(self.root_folder, train=True,
-                                                              transform=ContrastiveLearningViewGenerator(
-                                                                  self.get_simclr_pipeline_transform(32),
-                                                                  n_views),
-                                                              download=True),
+        if name == 'cifar10':
+            ds = datasets.CIFAR10(self.root_folder, train=True,
+                             transform=ContrastiveLearningViewGenerator(
+                                 self.get_simclr_pipeline_transform(32),
+                                 n_views),
+                             download=True)
+            ds.labels = np.array(ds.targets)
+            return DatasetWrapper(ds)
 
-                          'stl10': lambda: datasets.STL10(self.root_folder, split='train+unlabeled',
-                                                          transform=ContrastiveLearningViewGenerator(
-                                                              self.get_simclr_pipeline_transform(96),
-                                                              n_views),
-                                                          download=True)}
-
-        try:
-            dataset_fn = valid_datasets[name]
-        except KeyError:
-            raise InvalidDatasetSelection()
-        else:
-            return DatasetWrapper(dataset_fn())
-
+        if name == 'stl10':
+            ds = datasets.STL10(self.root_folder, split='train+unlabeled',
+                           transform=ContrastiveLearningViewGenerator(
+                               self.get_simclr_pipeline_transform(96),
+                               n_views),
+                           download=True)
+            return DatasetWrapper(ds)
+        raise NotImplemented(f'dataset {name} not supported')
 
     def get_test_dataset(self, name):
         if name == 'stl10':
             return datasets.STL10(self.root_folder, split='test',transform=transforms.ToTensor(), download=True)
         if name == 'stl10_train':
             return datasets.STL10(self.root_folder, split='train', transform=transforms.ToTensor(), download=True)
-
+        if name == 'cifar10':
+            ds = datasets.CIFAR10(self.root_folder, train=False, transform=transforms.ToTensor(), download=True)
+            ds.labels = np.array(ds.targets)
+            return ds
+        if name == 'cifar10_train':
+            ds = datasets.CIFAR10(self.root_folder, train=True, transform=transforms.ToTensor(), download=True)
+            ds.labels = np.array(ds.targets)
+            return ds
 
         raise ValueError("unsupported dataset")

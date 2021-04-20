@@ -5,35 +5,46 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from MulticoreTSNE import MulticoreTSNE as TSNE
+from neptune.new.types import File
+
+IMAGES_TO_LOG = 2
+
+CLASSES = ['outlier', 'inlier', 'train_inlier']
+ENUM = {k:i for i,k in enumerate(CLASSES)}
+CLASSIFIER_RESULTS = ['TP', 'FP', 'FN', 'TN', 'trainP']
+CLASSIFIER_RESULTS_ENUM = {k:i for i,k in enumerate(CLASSIFIER_RESULTS)}
 
 class Evaluator():
-    def __init__(self, neptune_run, args, model, logging):
+    def __init__(self, neptune_run, args, model, logging, params):
         self.neptune_run = neptune_run
         self.args = args
         self.model = model
         self.logging = logging
+        self.params = params
+        self.neptune_run['enum'] = ENUM
+        self.neptune_run['classifier_enum'] = CLASSIFIER_RESULTS_ENUM
 
-    def evaluate(self, test_loader, n_iter, train_dataset, train_labeled_loader):
-        all_features = []
-        all_labels = []
+    def evaluate(self, test_loader, train_labeled_loader):
+        test_features = []
+        test_labels = []
 
         for batch_id, (images, labels) in enumerate(test_loader):
             features = self.model(images.to(self.args.device))
-            all_features.append(features.cpu().detach().numpy())
-            all_labels.append(labels.detach().numpy())
+            test_features.append(features.cpu().detach().numpy())
+            test_labels.append(labels.detach().numpy())
 
-        all_labels = np.concatenate(all_labels, axis=0)
-        # maybe unite all other colors to -1?
-        all_features = np.concatenate(all_features, axis=0)
-        # solve linear svm to check separability of the class
-        self.svm(all_features, all_labels, n_iter)
-        self.separation_metrics(all_features, all_labels, n_iter)
-        positive_features = self.get_labeled_features(train_labeled_loader)
+        positive_train_features = self.get_labeled_features(train_labeled_loader)
+        all_features = np.concatenate([positive_train_features] + test_features, axis=0)
+
+        positive_train_labels = np.full(shape=self.args.num_labeled_examples, dtype=int,
+                                        fill_value=ENUM['train_inlier'])
+        reduced_test_labels = (np.concatenate(test_labels, axis=0) == self.args.relevant_class).astype(int)
+        all_labels = np.concatenate([positive_train_labels, reduced_test_labels])
+        self.svm(all_features, all_labels)
+        self.separation_metrics(all_features, all_labels)
         reduced_features = self.calculate_tsne(all_features, all_labels)
-        self.plot_tsne(all_labels, n_iter, reduced_features, test_loader.dataset.classes, 'tSNE')
-        # self.one_class_svm(all_features, all_labels, n_iter, positive_features, reduced_features)
-        self.k_nearest(all_features, all_labels, n_iter, positive_features, reduced_features)
-        self.neptune_run.flush()
+        self.plot_tsne(all_labels, reduced_features, CLASSES, 'tSNE')
+        self.k_nearest(all_features, all_labels, reduced_features)
 
     def get_labeled_features(self, train_labeled_loader):
         all_features = []
@@ -41,117 +52,99 @@ class Evaluator():
             features = self.model(images.to(self.args.device))
             all_features.append(features.cpu().detach().numpy())
 
+        np_images = images.cpu().detach().numpy().transpose(0,2,3,1)
+        assert np.all(np_images <= 1) and np.all(np_images >= 0)
+        chosen_im = np_images[np.random.choice(len(np_images))]
+        self.neptune_run['plots/train_images'].log(File.as_image(chosen_im))
         # maybe unite all other colors to -1?
         all_features = np.concatenate(all_features, axis=0)
         return all_features
 
-    def svm(self, all_features, all_labels, n_iter):
+    def svm(self, all_features, all_labels):
         """
         learning an SVM and checking it to see how separable the sets are
         """
-        binary_labels = (all_labels == self.args.rel_class).astype(int)
+        is_relevant_label = np.isin(all_labels, [ENUM['inlier'], ENUM['train_inlier']]).astype(int)
         svc = LinearSVC()
-        svc.fit(all_features, binary_labels)
-        binary_preds = svc.predict(all_features)
-        TP = (binary_labels & binary_preds).sum()
-        precision = TP / binary_preds.sum()
-        recall = TP / binary_labels.sum()
-        accur = (binary_labels == binary_preds).mean()
-        IoU = TP / (binary_labels | binary_preds).sum()
-        self.neptune_run.add_scalar('SVC/precision', precision, n_iter)
-        self.neptune_run.add_scalar('SVC/recall', recall, n_iter)
-        self.neptune_run.add_scalar('SVC/accuracy', accur, n_iter)
-        self.neptune_run.add_scalar('SVC/IoU', IoU, n_iter)
-        self.logging.info(f"SVM accuracy: {accur}")
+        svc.fit(all_features, is_relevant_label)
+        is_relevant_pred = svc.predict(all_features)
+        TP = (is_relevant_label & is_relevant_pred).sum()
+        precision = TP / is_relevant_pred.sum()
+        recall = TP / is_relevant_label.sum()
+        accur = (is_relevant_label == is_relevant_pred).mean()
+        IoU = TP / (is_relevant_label | is_relevant_pred).sum()
+        f_score = 2 * precision * recall / (precision + recall)
+        self.neptune_run['metrics/SVC/precision'].log(precision)
+        self.neptune_run['metrics/SVC/recall'].log(recall)
+        self.neptune_run['metrics/SVC/accuracy'].log(accur)
+        self.neptune_run['metrics/SVC/IoU'].log(IoU)
+        self.neptune_run['metrics/SVC/F-score'].log(f_score)
 
-    def one_class_svm(self, all_features, all_labels, n_iter, positive_features, reduced_features):
-        # ratio of outliers to expect in the features we try to contour
-        for nu in [0.05, 0.1, 0.2]:
-            for gamma in [1e-7, 1e-6, 1e-5, 1e-4]:
-                svm = OneClassSVM(nu=nu, gamma=gamma)
-                svm.fit(positive_features)
-                # inliers are 1, outliers are -1
-                is_inlier_pred = svm.predict(all_features) == 1
-                is_inlier_true = all_labels == self.args.rel_class
-                accur = (is_inlier_true == is_inlier_pred).mean()
-                TP = (is_inlier_true & is_inlier_pred).sum()
-                recall = np.nan_to_num(TP / is_inlier_true.sum())
-                precision = np.nan_to_num(TP / is_inlier_pred.sum())
-                IoU = np.nan_to_num(TP / (is_inlier_true | is_inlier_pred).sum())
-                f_score = 2 * precision * recall / (precision + recall)
-                self.neptune_run.add_scalar(f'OneClassSVM_recall/nu={nu}_gamma={gamma}', recall, n_iter)
-                self.neptune_run.add_scalar(f'OneClassSVM_precision/nu={nu}_gamma={gamma}', precision, n_iter)
-                self.neptune_run.add_scalar(f'OneClassSVM_accuracy/nu={nu}_gamma={gamma}', accur, n_iter)
-                self.neptune_run.add_scalar(f'OneClassSVM_IoU/nu={nu}_gamma={gamma}', IoU, n_iter)
-                self.neptune_run.add_scalar(f'OneClassSVM_Fscore/nu={nu}_gamma={gamma}', f_score, n_iter)
-                self.plot_tsne(is_inlier_pred.astype(int), n_iter, reduced_features,
-                               classes=['outlier', 'inlier'],
-                               plot_name=f'OneClassSVM/nu={nu}_gamma={gamma}')
-
-    def k_nearest(self, all_features, all_labels, n_iter, positive_features, reduced_features):
+    def k_nearest(self, all_features, all_labels, reduced_features):
         # ratio of outliers to expect in the features we try to contour
         roc_fig, roc_axis = plt.subplots()
-        for k in [1, 2, 10, 25, 50]:
-            nearest = NearestNeighbors(n_neighbors=k)
-            nearest.fit(positive_features)
-            distances, indices = nearest.kneighbors(all_features)
-            mean_distance = distances.mean(axis=1)
-            is_outlier_true = (all_labels != self.args.rel_class).astype(int)
-            fpr, tpr, thresholds = roc_curve(is_outlier_true, mean_distance)
-            auc = roc_auc_score(is_outlier_true, mean_distance)
-            self.neptune_run.add_scalar(f'k_nearest_auc/k={k}', auc, n_iter)
-            roc_axis.plot(fpr, tpr, label=f'k={k}_auc={auc:.3f}')
-            # optimal is closest point to [0,1]
-            diff_from_best = (1 - tpr) ** 2 + fpr ** 2
-            optimal_cutoff = thresholds[np.argmin(diff_from_best)]
-            self.plot_tsne((mean_distance > optimal_cutoff).astype(int), n_iter, reduced_features,
-                           classes=['inlier', 'outlier'], plot_name=f'k_nearest_tSNE/k={k}')
+        is_train_feature = all_labels == ENUM['train_inlier']
+        for features, mode in [(all_features, 'regular'), (reduced_features, 'reduced')]:
+            for k in [1, 2, 10, 25, 50]:
+                nearest = NearestNeighbors(n_neighbors=k)
+                nearest.fit(features[is_train_feature])
+                distances, indices = nearest.kneighbors(features[~is_train_feature])
+                mean_distance = distances.mean(axis=1)
+                is_outlier_true = (all_labels[~is_train_feature] == ENUM['outlier']).astype(int)
+                fpr, tpr, thresholds = roc_curve(is_outlier_true, mean_distance)
+                auc = roc_auc_score(is_outlier_true, mean_distance)
+                self.neptune_run[f'metrics/k_nearest_auc/{mode}_k={k}'].log(auc)
+                roc_axis.plot(fpr, tpr, label=f'k={k}_auc={auc:.2f}')
+                # optimal is closest point to [0,1]
+                diff_from_best = (1 - tpr) ** 2 + fpr ** 2
+                cutoff_idx = np.argmin(diff_from_best)
+                optimal_cutoff = thresholds[cutoff_idx]
+                roc_axis.plot(fpr[cutoff_idx], tpr[cutoff_idx], 'xk')
+                is_outlier_pred = mean_distance > optimal_cutoff
+                classifier_labels = np.full_like(all_labels, fill_value=CLASSIFIER_RESULTS_ENUM['trainP'])
+                classifier_labels[~is_train_feature] = 2 * is_outlier_pred + is_outlier_true
+                self.plot_tsne(classifier_labels, reduced_features,
+                               classes=CLASSIFIER_RESULTS, plot_name=f'{mode}_{k}_nearest')
 
         roc_axis.set_xlabel('FPR')
         roc_axis.set_ylabel('TPR')
         roc_axis.legend('lower left')
-        roc_fig.canvas.draw()
-        roc_im = np.fromstring(roc_fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
-        roc_im = roc_im.reshape(roc_fig.canvas.get_width_height()[::-1] + (3,))
-        self.neptune_run.add_image(f'k_nearest_roc/k={k}', roc_im, global_step=n_iter, dataformats='HWC')
+        self.neptune_run[f'plots/k_nearest_roc'].log(roc_fig)
         plt.close('all')
 
-    def plot_tsne(self, all_labels, n_iter, reduced_features, classes, plot_name):
+    def plot_tsne(self, all_labels, reduced_features, classes, plot_name):
         fig, axis = plt.subplots()
-        cmap = plt.cm.get_cmap('tab10')(np.arange(10))
+        cmap = plt.cm.get_cmap('tab10')(np.arange(11))
         cmap[:, -1] = 0.5
-        # seeing our class last
-        for lab in np.unique(all_labels)[::-1]:
+        for lab in np.unique(all_labels):
             mask = all_labels == lab
             x, y = reduced_features[mask].T
-            axis.scatter(x, y, c=cmap[[lab]], label=classes[lab])
+            axis.scatter(x, y, c=cmap[[lab]], label=classes[lab], s=10)
 
         axis.legend(loc='upper left')
-        fig.canvas.draw()
-        tsne_plot_array = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
-        tsne_plot_array = tsne_plot_array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        self.neptune_run.add_image(plot_name, tsne_plot_array, global_step=n_iter, dataformats='HWC')
+        self.neptune_run['plots/' + plot_name].log(fig)
         plt.close('all')
 
     def calculate_tsne(self, all_features, all_labels):
         tsne = TSNE(n_jobs=self.args.workers)
         reduced_features = tsne.fit_transform(all_features)
-        rel_centroid = reduced_features[all_labels == self.args.rel_class].mean(axis=0)
+        rel_centroid = reduced_features[np.isin(all_labels, [ENUM['inlier'], ENUM['train_inlier']])].mean(axis=0)
         rel_centroid = rel_centroid / np.linalg.norm(rel_centroid)
         # rotate so the centroid will be at the positive x axis
         R = np.stack([rel_centroid, rel_centroid[::-1]])
         R[0, 1] = -R[0, 1]
+        assert np.allclose(R @ R.T, np.eye(2))
         reduced_features = (reduced_features @ R)
         return reduced_features
 
-    def separation_metrics(self, all_features, all_labels, n_iter):
+    def separation_metrics(self, all_features, all_labels):
         def get_mean_cov(features):
             mean = features.mean(axis=0)
             zero_mean_features = features - mean[None, :]
             cov = zero_mean_features.T @ zero_mean_features
             return mean, cov
 
-        binary_labels = (all_labels == self.args.rel_class)
+        binary_labels = np.isin(all_labels, [ENUM['inlier'], ENUM['train_inlier']])
         myu_1, sigma_1 = get_mean_cov(all_features[binary_labels])
         myu_2, sigma_2 = get_mean_cov(all_features[~binary_labels])
         w = np.linalg.inv(sigma_1 + sigma_2) @ (myu_1 - myu_2)
@@ -160,7 +153,6 @@ class Evaluator():
         # between -1 to 1. best result is 1.
         silhouette = silhouette_score(all_features, binary_labels.astype(int))
         silhouette_all = silhouette_score(all_features, all_labels)
-        self.neptune_run.add_scalar('separation/silhouette', silhouette, n_iter)
-        self.neptune_run.add_scalar('separation/silhouette_all', silhouette_all, n_iter)
-        self.neptune_run.add_scalar('separation/FLD', fisher_score, n_iter)
-        self.logging.info(f"silhouette: {silhouette}")
+        self.neptune_run['metrics/separation/silhouette'].log(silhouette)
+        self.neptune_run['metrics/separation/silhouette_all'].log(silhouette_all)
+        self.neptune_run['metrics/separation/FLD'].log(fisher_score)

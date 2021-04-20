@@ -3,7 +3,6 @@ import os
 import sys
 from datetime import datetime
 import matplotlib
-matplotlib.use('Agg')
 import torch
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
@@ -30,17 +29,17 @@ class SimCLR(object):
         self.optimizer = kwargs['optimizer']
         self.scheduler = kwargs['scheduler']
         self.last_valid_index = kwargs['last_valid_index']
-
+        self.params = kwargs['params']
         current_time = datetime.now().strftime('%b%d_%H-%M-%S')
         # log_dir = "runs/{}_lamb{}{:.2f}_exmp{}_class{}".format(current_time, self.params["lambda'], self.params['num_examples'], self.params['relevant_class'])
         # self.writer = SummaryWriter(log_dir)
-        logging.basicConfig(filename=os.path.join(self.writer.log_dir, 'training.log'), level=logging.DEBUG)
+        # logging.basicConfig(filename=os.path.join(self.writer.log_dir, 'training.log'), level=logging.DEBUG)
         self.criterion = torch.nn.CrossEntropyLoss().to(self.args.device)
         self.compactness_criterion = torch.nn.MSELoss().to(self.args.device)
-        self.evaluator = Evaluator(self.writer, self.args, self.model, logging)
+        self.evaluator = Evaluator(self.neptune_run, self.args, self.model, logging, params=self.params)
 
     def info_nce_loss(self, features):
-        labels = torch.cat([torch.arange(self.args.batch_size) for i in range(self.args.n_views)], dim=0)
+        labels = torch.cat([torch.arange(self.params['batch_size']) for i in range(self.args.n_views)], dim=0)
         labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
         labels = labels.to(self.args.device)
 
@@ -66,26 +65,26 @@ class SimCLR(object):
         logits = torch.cat([positives, negatives], dim=1)
         labels = torch.zeros(logits.shape[0], dtype=torch.long).to(self.args.device)
 
-        logits = logits / self.args.temperature
+        logits = logits / self.params['temperature']
         return logits, labels
 
     def compactness_loss_info(self, features, classes, indices):
-        features = F.normalize(features, dim=1)
-        rel_indices = (classes == self.args.rel_class) & (indices < self.last_valid_index)
+        # features = F.normalize(features, dim=1)
+        rel_indices = (classes == self.params['relevant_class']) & (indices < self.last_valid_index)
         rel_features: torch.Tensor = features[torch.cat([rel_indices, rel_indices])].to(self.args.device)
         meaned_rel_features = rel_features - rel_features.mean(dim=0, keepdim=True)
         return meaned_rel_features
 
     def train(self, train_loader, test_loader, train_labeled_loader):
         scaler = GradScaler(enabled=self.args.fp16_precision)
-        # save config file
-        save_config_file(self.neptune_run.log_dir, self.args)
+
         n_iter = 0
-        self.evaluator.evaluate(test_loader, n_iter, train_loader.dataset.dataset, train_labeled_loader)
-        logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
+        self.evaluator.evaluate(test_loader, train_labeled_loader)
+        logging.info(f"Start SimCLR training for {self.params['epochs']} epochs.")
         logging.info(f"Training with gpu: {not self.args.disable_cuda}.")
-        for epoch_counter in range(self.args.epochs):
-            for images, classes, indices in tqdm(train_loader):
+        for epoch_counter in range(self.params['epochs']):
+            self.neptune_run['cur_epoch'].log(epoch_counter)
+            for images, classes, indices in train_loader:
                 images = torch.cat(images, dim=0)
                 images = images.to(self.args.device)
 
@@ -94,42 +93,41 @@ class SimCLR(object):
                     logits, labels = self.info_nce_loss(features)
                     constructive_loss = self.criterion(logits, labels)
                     zero_mean_labeled = self.compactness_loss_info(features, classes, indices)
-                    compactness_loss = self.args.lamb * self.compactness_criterion(zero_mean_labeled,
+                    compactness_loss = self.params['lambda'] * self.compactness_criterion(zero_mean_labeled,
                                                                                    torch.zeros_like(zero_mean_labeled))
                     # convert nan loss to 0, when there are no samples to make compact
                     compactness_loss[compactness_loss != compactness_loss] = 0
 
                 self.optimizer.zero_grad()
 
-                scaler.scale(constructive_loss + self.args.lamb * compactness_loss).backward()
+                scaler.scale(constructive_loss + compactness_loss).backward()
 
                 scaler.step(self.optimizer)
                 scaler.update()
 
                 if n_iter % self.args.log_every_n_steps == 0:
                     top1, top5 = accuracy(logits, labels, topk=(1, 5))
-                    self.neptune_run.add_scalar('losses/constructive_loss', constructive_loss, global_step=n_iter)
-                    self.neptune_run.add_scalar('losses/compactness_loss', compactness_loss, global_step=n_iter)
-                    self.neptune_run.add_scalar('losses/total_loss', constructive_loss + compactness_loss,
-                                           global_step=n_iter)
-                    self.neptune_run.add_scalar('acc/top1', top1[0], global_step=n_iter)
-                    self.neptune_run.add_scalar('acc/top5', top5[0], global_step=n_iter)
-                    self.neptune_run.add_scalar('learning_rate', self.scheduler.get_lr()[0], global_step=n_iter)
+                    self.neptune_run['losses/constructive_loss'].log(constructive_loss)
+                    self.neptune_run['losses/compactness_loss'].log(compactness_loss)
+                    self.neptune_run['losses/total_loss'].log(constructive_loss + compactness_loss)
+                    self.neptune_run['acc/top1'].log(top1[0])
+                    self.neptune_run['acc/top5'].log(top5[0])
+                    self.neptune_run['losses/learning_rate'].log(self.scheduler.get_lr()[0])
 
                 n_iter += 1
             # run tests every 5 epochs
 
             logging.info(f"evaluating on epoch {epoch_counter + 1}")
-            self.evaluator.evaluate(test_loader, n_iter, train_loader.dataset.dataset, train_labeled_loader)
+            self.evaluator.evaluate(test_loader, train_labeled_loader)
             # warmup for the first 10 epochs
             if epoch_counter >= 10:
                 self.scheduler.step()
 
             if epoch_counter + 1 % 20 == 0:
                 logging.info("saving checkpoint")
-                checkpoint_name = 'checkpoint_{:04d}.pth.tar'.format(self.args.epochs)
+                checkpoint_name = 'checkpoint_{:04d}.pth.tar'.format(self.params['epochs'])
                 save_checkpoint({
-                    'epoch': self.args.epochs,
+                    'epoch': self.params['epochs'],
                     'arch': self.args.arch,
                     'state_dict': self.model.state_dict(),
                     'optimizer': self.optimizer.state_dict(),
