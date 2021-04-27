@@ -8,4 +8,4 @@ dir=/cs/labs/daphna/avihu.dekel/simCLR/
 cd $dir
 source /cs/labs/daphna/avihu.dekel/env/bin/activate
 module load torch
-python run.py --lambda 0.1 --workers 6
+python run.py --workers 6

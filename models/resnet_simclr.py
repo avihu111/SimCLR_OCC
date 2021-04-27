@@ -13,9 +13,21 @@ class ResNetSimCLR(nn.Module):
 
         self.backbone = self._get_basemodel(base_model)
         dim_mlp = self.backbone.fc.in_features
-
+        self.last_activations = {}
         # add mlp projection head
         self.backbone.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.backbone.fc)
+
+        def get_activation():
+            def hook(model, input, output):
+                # self.last_activations['input'] = input[0].detach()
+                self.last_activations['output'] = output.detach()
+
+            return hook
+
+        if base_model == 'resnet18':
+            self.backbone.fc[0].register_forward_hook(get_activation())
+        elif base_model == 'resnet50':
+            self.backbone.fc[0].register_forward_hook(get_activation())
 
     def _get_basemodel(self, model_name):
         try:

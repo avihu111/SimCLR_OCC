@@ -3,7 +3,7 @@
 #SBATCH -c 6
 #SBATCH --time=1-0
 #SBATCH --gres=gpu:1,vmem:8g
-#SBATCH --array=0-8:3
+#SBATCH --array=0-1
 
 function ind2sub() {
     local idx="$1"   # Save first argument in a variable
@@ -44,7 +44,7 @@ function shape_from_arrays() {
 
 echo ${SLURM_ARRAY_TASK_ID}
 
-ARRAY1=(1 2 3 4 5 6 7 8 9)
+ARRAY1=(25 50)
 ARRAY2=(-)
 
 
@@ -63,5 +63,5 @@ cd $dir
 source /cs/labs/daphna/avihu.dekel/env/bin/activate
 
 module load torch
-python run.py --relevant-class ${var1} --epochs 50 --workers 6
+python run.py --num-labeled-examples 40 --epochs 50 --workers 6
 

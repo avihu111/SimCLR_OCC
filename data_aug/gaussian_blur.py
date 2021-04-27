@@ -3,11 +3,10 @@ import torch
 from torch import nn
 from torchvision.transforms import transforms
 
-np.random.seed(0)
-
 
 class GaussianBlur(object):
     """blur a single image on CPU"""
+
     def __init__(self, kernel_size):
         radias = kernel_size // 2
         kernel_size = radias * 2 + 1

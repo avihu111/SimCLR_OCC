@@ -1,6 +1,5 @@
 import numpy as np
-
-np.random.seed(0)
+from PIL import Image
 
 
 class ContrastiveLearningViewGenerator(object):
@@ -12,3 +11,13 @@ class ContrastiveLearningViewGenerator(object):
 
     def __call__(self, x):
         return [self.base_transform(x) for i in range(self.n_views)]
+
+
+class FixImageChannels(object):
+    def __call__(self, im):
+        if im.mode != 'RGB':
+            np_im = np.array(im)
+            np_rgb_im = np.stack([np_im, np_im, np_im], axis=-1)
+            return Image.fromarray(np_rgb_im)
+
+        return im
