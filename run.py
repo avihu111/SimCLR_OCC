@@ -114,9 +114,10 @@ def main():
                                                                last_epoch=-1)
 
         #  It’s a no-op if the 'gpu_index' argument is a negative integer or None.
+        # todo: complete these values
         neptune_run = neptune.init(name=run_name,
-                                   project='avihu/simCLR',
-                                   api_token='eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiIyODYzMGNiMC0yNzk3LTQ0MmYtYWVkMy0wNDgyMTIzMzk5NjkifQ==',
+                                   project='***',
+                                   api_token='***',
                                    source_files=['*.py', 'requirements.txt'], mode=mode)
         neptune_run['parameters'] = params
         simclr = SimCLR(model=model, optimizer=optimizer, scheduler=scheduler, args=args,
